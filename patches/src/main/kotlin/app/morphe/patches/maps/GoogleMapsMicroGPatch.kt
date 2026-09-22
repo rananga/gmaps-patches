@@ -4,6 +4,7 @@ import app.morphe.patcher.Fingerprint
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
 import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.removeInstructions
 import app.morphe.patcher.patch.ApkFileType
 import app.morphe.patcher.patch.AppTarget
 import app.morphe.patcher.patch.Compatibility
@@ -19,6 +20,7 @@ import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21c
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction31c
 import com.android.tools.smali.dexlib2.iface.instruction.FiveRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.ThreeRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.TwoRegisterInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
 import com.android.tools.smali.dexlib2.iface.instruction.RegisterRangeInstruction
@@ -27,6 +29,7 @@ import com.android.tools.smali.dexlib2.iface.instruction.formats.Instruction31c
 import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.iface.reference.FieldReference
 import com.android.tools.smali.dexlib2.iface.reference.StringReference
+import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableStringReference
 import org.w3c.dom.Document
 import org.w3c.dom.Element
@@ -50,6 +53,10 @@ private const val EXTENSION_CLASS = "Lapp/morphe/extension/shared/patches/GmsCor
 private const val UTILS_CLASS = "Lapp/morphe/extension/shared/Utils;"
 private const val BYD_AUDIO_CLASS =
     "Lapp/morphe/extension/maps/patches/BydNavigationAudioPatch;"
+private const val TTS_ENGINE_CLASS =
+    "Lapp/morphe/extension/maps/patches/TtsEnginePatch;"
+private const val TTS_PACKAGE_NAME = "com.google.android.tts"
+private const val TTS_INTENT_ACTION = "android.intent.action.TTS_SERVICE"
 private const val LOCATION_SERVICE_CLASS =
     "Lapp/morphe/extension/maps/patches/LocationServicePatch;"
 private const val LOCATION_SERVICE_ACTION =
@@ -95,6 +102,7 @@ val googleMapsMicroGPatch = bytecodePatch(
         patchAvailabilityChecks()
         suppressMisleadingPlayServicesUpdateNotification()
         patchBydNavigationAudio()
+        patchTtsEngine()
         injectExtensionContext()
         injectGmsCoreCheck()
     }
@@ -260,14 +268,29 @@ private fun ensureQueryPackage(document: Document, manifest: Element) {
             }
         }
 
-    val exists = queries.directChildren("package").any {
-        it.getAttribute("android:name") == GMS_CORE_PACKAGE_NAME
+    val declaredPackages = queries.directChildren("package").map {
+        it.getAttribute("android:name")
+    }.toSet()
+
+    listOf(GMS_CORE_PACKAGE_NAME, TTS_PACKAGE_NAME, "com.github.olga_yakovleva.rhvoice.android").forEach { packageName ->
+        if (packageName !in declaredPackages) {
+            val packageNode = document.createElement("package")
+            packageNode.setAttribute("android:name", packageName)
+            queries.appendChild(packageNode)
+        }
     }
 
-    if (!exists) {
-        val packageNode = document.createElement("package")
-        packageNode.setAttribute("android:name", GMS_CORE_PACKAGE_NAME)
-        queries.appendChild(packageNode)
+    val hasTtsIntent = queries.directChildren("intent").any { intentNode ->
+        intentNode.directChildren("action").any {
+            it.getAttribute("android:name") == TTS_INTENT_ACTION
+        }
+    }
+    if (!hasTtsIntent) {
+        val intentNode = document.createElement("intent")
+        val actionNode = document.createElement("action")
+        actionNode.setAttribute("android:name", TTS_INTENT_ACTION)
+        intentNode.appendChild(actionNode)
+        queries.appendChild(intentNode)
     }
 }
 
@@ -671,6 +694,258 @@ private fun app.morphe.patcher.patch.BytecodePatchContext.patchBydNavigationAudi
     )
 }
 
+private fun ttsEngineResolveInstructions(instruction: Any): String = when (instruction) {
+    is FiveRegisterInstruction -> {
+        if (instruction.registerCount < 4) {
+            throw PatchException("Unexpected TextToSpeech.<init> register count: ${instruction.registerCount}")
+        }
+        val contextRegister = instruction.registerD
+        val engineRegister = instruction.registerF
+        """
+            invoke-static { v$contextRegister, v$engineRegister }, $TTS_ENGINE_CLASS->resolveEngine(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;
+            move-result-object v$engineRegister
+        """.trimIndent()
+    }
+
+    is RegisterRangeInstruction -> {
+        if (instruction.registerCount < 4) {
+            throw PatchException("Unexpected TextToSpeech.<init> range count: ${instruction.registerCount}")
+        }
+        val contextRegister = instruction.startRegister + 1
+        val engineRegister = instruction.startRegister + 3
+        """
+            invoke-static { v$contextRegister, v$engineRegister }, $TTS_ENGINE_CLASS->resolveEngine(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;
+            move-result-object v$engineRegister
+        """.trimIndent()
+    }
+
+    else -> throw PatchException("Unsupported TextToSpeech.<init> instruction format: $instruction")
+}
+
+private fun ttsSetAudioAttributesWrapperInvoke(instruction: Any): String = when (instruction) {
+    is FiveRegisterInstruction -> {
+        if (instruction.registerCount != 2) {
+            throw PatchException("Unexpected TextToSpeech.setAudioAttributes register count: ${instruction.registerCount}")
+        }
+        "invoke-static { v${instruction.registerC}, v${instruction.registerD} }, " +
+            "$TTS_ENGINE_CLASS->setAudioAttributes(Landroid/speech/tts/TextToSpeech;Landroid/media/AudioAttributes;)I"
+    }
+
+    is RegisterRangeInstruction -> {
+        if (instruction.registerCount != 2) {
+            throw PatchException("Unexpected TextToSpeech.setAudioAttributes range count: ${instruction.registerCount}")
+        }
+        val endRegister = instruction.startRegister + 1
+        "invoke-static/range { v${instruction.startRegister} .. v$endRegister }, " +
+            "$TTS_ENGINE_CLASS->setAudioAttributes(Landroid/speech/tts/TextToSpeech;Landroid/media/AudioAttributes;)I"
+    }
+
+    else -> throw PatchException("Unsupported TextToSpeech.setAudioAttributes instruction format: $instruction")
+}
+
+private fun ttsSetEngineWrapperInvoke(instruction: Any): String = when (instruction) {
+    is FiveRegisterInstruction -> {
+        if (instruction.registerCount != 2) {
+            throw PatchException("Unexpected TextToSpeech.setEngineByPackageName register count: ${instruction.registerCount}")
+        }
+        "invoke-static { v${instruction.registerC}, v${instruction.registerD} }, " +
+            "$TTS_ENGINE_CLASS->setEngineByPackageName(Landroid/speech/tts/TextToSpeech;Ljava/lang/String;)I"
+    }
+
+    is RegisterRangeInstruction -> {
+        if (instruction.registerCount != 2) {
+            throw PatchException("Unexpected TextToSpeech.setEngineByPackageName range count: ${instruction.registerCount}")
+        }
+        val endRegister = instruction.startRegister + 1
+        "invoke-static/range { v${instruction.startRegister} .. v$endRegister }, " +
+            "$TTS_ENGINE_CLASS->setEngineByPackageName(Landroid/speech/tts/TextToSpeech;Ljava/lang/String;)I"
+    }
+
+    else -> throw PatchException("Unsupported TextToSpeech.setEngineByPackageName instruction format: $instruction")
+}
+
+private fun app.morphe.patcher.patch.BytecodePatchContext.patchTtsEngine() {
+    var initHooked = 0
+    var attributesHooked = 0
+    var setEngineHooked = 0
+    var flagsHooked = 0
+    var wifiBypassed = 0
+    var factoryHooked = 0
+    var audioResolverHooked = 0
+
+    classDefForEach { classDef ->
+        if (!classDef.type.startsWith("Lapp/morphe/extension/")) {
+            val mutableClass = mutableClassDefBy(classDef)
+            mutableClass.methods.forEach { method ->
+                val implementation = method.implementation ?: return@forEach
+                val instructions = implementation.instructions.toList()
+                var offset = 0
+
+                // 1. Bypass Wi-Fi check on speech dispatch if this method checks Layob.b
+                if (method.returnType == "Z" && method.parameterTypes.isEmpty()) {
+                    val accessesLayob = instructions.any { ins ->
+                        (ins as? ReferenceInstruction)?.reference?.let { ref ->
+                            (ref is FieldReference && ref.definingClass.contains("Layob")) ||
+                                (ref is TypeReference && ref.type.contains("Layob"))
+                        } == true
+                    }
+                    if (accessesLayob && instructions.any { it.opcode == Opcode.IGET_BOOLEAN }) {
+                        method.addInstructions(
+                            0,
+                            """
+                                const/4 v0, 0x1
+                                return v0
+                            """.trimIndent(),
+                        )
+                        wifiBypassed++
+                        return@forEach
+                    }
+                }
+
+
+                // 2. Patch TTS Provider Factory (Lbmmt;->h()) to unconditionally create dynamic provider
+                if (classDef.type == "Lbmmt;" && method.name == "h" &&
+                    method.returnType == "V" && method.parameterTypes.isEmpty()) {
+                    // Remove the 22 instructions (25 to 46) that gate dynamic TTS creation behind cqgy.d and cggd flags.
+                    // Instruction 47 (invoking blvr.a to create dynamic Lblvb) will now execute unconditionally right after instruction 24.
+                    method.removeInstructions(25, 22)
+                    factoryHooked++
+                    return@forEach
+                }
+
+                // 3. Patch Maneuver Audio Resolver (Lbmmt;->g(Lblvm;)Lbmmr;) to prioritize dynamic street names with canned fallback
+                if (classDef.type == "Lbmmt;" && method.name == "g" &&
+                    method.parameterTypes.map { it.toString() } == listOf("Lblvm;") && method.returnType == "Lbmmr;") {
+                    val count = implementation.instructions.count()
+                    method.removeInstructions(0, count)
+                    method.addInstructions(
+                        0,
+                        """
+                            invoke-virtual {v6}, Lbmmt;->b()Lblvu;
+                            move-result-object v0
+                            if-eqz v0, :check_canned
+                            invoke-interface {v0, v7}, Lblvu;->a(Lblvm;)Ljava/io/File;
+                            move-result-object v0
+                            if-eqz v0, :check_canned
+                            invoke-virtual {v0}, Ljava/io/File;->exists()Z
+                            move-result v2
+                            if-eqz v2, :check_canned
+                            invoke-virtual {v0}, Ljava/io/File;->canRead()Z
+                            move-result v2
+                            if-eqz v2, :check_canned
+                            iget-object v2, v6, Lbmmt;->d:Lbmlh;
+                            iget-object v3, v6, Lbmmt;->e:Layxm;
+                            const/4 v4, 0x1
+                            new-instance v1, Lbmmr;
+                            invoke-direct {v1, v0, v2, v3, v4}, Lbmmr;-><init>(Ljava/io/File;Lbmlh;Layxm;Z)V
+                            return-object v1
+
+                            :check_canned
+                            invoke-virtual {v6}, Lbmmt;->c()Lblvu;
+                            move-result-object v0
+                            if-eqz v0, :return_null
+                            check-cast v0, Lblvh;
+                            iget-object v2, v0, Lblvh;->g:Lcamt;
+                            iget-object v3, v0, Lblvh;->e:Lcaxx;
+                            iget-object v4, v0, Lblvh;->b:Lawcl;
+                            invoke-static {v4, v7, v3, v2}, Lblvh;->b(Lawcl;Lblvm;Lcaxx;Lcamt;)Lblvp;
+                            move-result-object v2
+                            iget-object v0, v0, Lblvh;->f:Lbeey;
+                            invoke-virtual {v0, v2}, Lbeey;->l(Lblvp;)Ljava/io/File;
+                            move-result-object v0
+                            if-eqz v0, :return_null
+                            invoke-virtual {v0}, Ljava/io/File;->exists()Z
+                            move-result v2
+                            if-eqz v2, :return_null
+                            invoke-virtual {v0}, Ljava/io/File;->canRead()Z
+                            move-result v2
+                            if-eqz v2, :return_null
+                            iget-object v2, v6, Lbmmt;->d:Lbmlh;
+                            iget-object v3, v6, Lbmmt;->e:Layxm;
+                            const/4 v4, 0x0
+                            new-instance v1, Lbmmr;
+                            invoke-direct {v1, v0, v2, v3, v4}, Lbmmr;-><init>(Ljava/io/File;Lbmlh;Layxm;Z)V
+                            return-object v1
+
+                            :return_null
+                            const/4 v1, 0x0
+                            return-object v1
+                        """.trimIndent(),
+                    )
+                    audioResolverHooked++
+                    return@forEach
+                }
+
+                instructions.forEachIndexed { index, instruction ->
+                    // 4. Force enable dynamic speech flags (cqgy.c:Z, o:Z, m:Z, p:Z, cggd.c:Z, e:Z, i:Z)
+                    if (instruction.opcode == Opcode.IGET_BOOLEAN) {
+                        val fieldRef = (instruction as? ReferenceInstruction)?.reference as? FieldReference
+                        if (fieldRef?.type == "Z") {
+                            val reg = (instruction as? TwoRegisterInstruction)?.registerA
+                            if (reg != null) {
+                                if (fieldRef.definingClass.contains("cqgy")) {
+                                    when (fieldRef.name) {
+                                        "c", "o", "m" -> {
+                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x1")
+                                            flagsHooked++
+                                        }
+                                        "p" -> {
+                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x0")
+                                            flagsHooked++
+                                        }
+                                    }
+                                } else if (fieldRef.definingClass.contains("cggd")) {
+                                    when (fieldRef.name) {
+                                        "c" -> {
+                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x1")
+                                            flagsHooked++
+                                        }
+                                        "e", "i" -> {
+                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x0")
+                                            flagsHooked++
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 5. Hook TextToSpeech constructor and audio attributes
+                    val ref = instruction.methodReferenceOrNull() ?: return@forEachIndexed
+                    if (ref.definingClass == "Landroid/speech/tts/TextToSpeech;") {
+                        when {
+                            ref.name == "<init>" &&
+                                ref.parameterTypes.map { it.toString() } ==
+                                listOf("Landroid/content/Context;", "Landroid/speech/tts/TextToSpeech\$OnInitListener;", "Ljava/lang/String;") -> {
+                                val resolveCode = ttsEngineResolveInstructions(instruction)
+                                method.addInstructions(index + offset, resolveCode)
+                                offset += 2
+                                initHooked++
+                            }
+
+                            ref.name == "setAudioAttributes" &&
+                                ref.parameterTypes.map { it.toString() } == listOf("Landroid/media/AudioAttributes;") &&
+                                ref.returnType == "I" -> {
+                                method.replaceInstruction(index + offset, ttsSetAudioAttributesWrapperInvoke(instruction))
+                                attributesHooked++
+                            }
+
+                            ref.name == "setEngineByPackageName" &&
+                                ref.parameterTypes.map { it.toString() } == listOf("Ljava/lang/String;") &&
+                                ref.returnType == "I" -> {
+                                method.replaceInstruction(index + offset, ttsSetEngineWrapperInvoke(instruction))
+                                setEngineHooked++
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    logger.info("Patched TextToSpeech: factory=$factoryHooked, resolver=$audioResolverHooked, inits=$initHooked, audioAttributes=$attributesHooked, setEngine=$setEngineHooked, dynamicFlags=$flagsHooked, wifiBypassed=$wifiBypassed")
+}
+
 private fun app.morphe.patcher.patch.BytecodePatchContext.patchExtensionRuntime() {
     val vendorMethod = extensionVendorFingerprint.methodOrNull
         ?: throw PatchException("Failed to match GmsCore extension vendor hook")
@@ -860,6 +1135,10 @@ private fun app.morphe.patcher.patch.BytecodePatchContext.injectExtensionContext
     method.addInstruction(
         0,
         "invoke-static/range { p0 .. p0 }, $UTILS_CLASS->setContext(Landroid/content/Context;)V",
+    )
+    method.addInstruction(
+        1,
+        "invoke-static/range { p0 .. p0 }, $TTS_ENGINE_CLASS->init(Landroid/content/Context;)V",
     )
 }
 

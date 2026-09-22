@@ -54,3 +54,5 @@ morphe-desktop-*.jar
 
 # VS Code workspace state
 .vscode/
+.vs/
+

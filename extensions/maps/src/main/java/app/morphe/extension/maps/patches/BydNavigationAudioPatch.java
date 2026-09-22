@@ -22,8 +22,9 @@ public final class BydNavigationAudioPatch {
         if (isBydBuild()) {
             try {
                 Context context = Utils.getContext();
-                AudioManager audioManager =
-                        (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+                AudioManager audioManager = context == null
+                        ? null
+                        : (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
                 int maximum = audioManager == null
                         ? 0
                         : audioManager.getStreamMaxVolume(STREAM_NAVI);
@@ -52,8 +53,9 @@ public final class BydNavigationAudioPatch {
 
         try {
             Context context = Utils.getContext();
-            AudioManager audioManager =
-                    (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
+            AudioManager audioManager = context == null
+                    ? null
+                    : (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
             int maximum = audioManager == null
                         ? 0
                         : audioManager.getStreamMaxVolume(STREAM_NAVI);

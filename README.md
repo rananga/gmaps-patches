@@ -91,6 +91,52 @@ For gmaps-patches 1.1.0 and newer, replace ReVanced GmsCore or upstream MicroG-R
 
 From bundle 1.2.0, Morphe Desktop uses `Google Maps Morphe` as the app name in its patching interface and output filenames, such as `Google-Maps-Morphe-26.36.05.973607363-patches-1.2.0.apk`. The installed app name is unchanged.
 
+## Voice Navigation & Text-to-Speech (TTS) Setup
+
+The patch enables full spoken voice guidance (including street names, distance alerts, and maneuver prompts) and routes speech through BYD's vehicle navigation channel (`STREAM_NAVI = 14`), allowing navigation prompts to automatically duck media playback.
+
+Because Google Maps delegates dynamic voice synthesis to the Android Text-to-Speech subsystem, you need a working TTS engine installed on the head unit.
+
+### Recommended Engine: Google Text-to-Speech v3.21.10
+
+For BYD DiLink and other de-Googled environments, **Google Text-to-Speech v3.21.10** is strongly recommended over newer builds:
+
+- **Why newer Google TTS builds fail on DiLink**: Modern Google Speech Services builds (2024–2026) depend on Google Play Store on-demand split delivery (Play Asset Delivery). Without official Google Play Services, modern builds cannot download voice files and will stay stuck on *"Waiting for download"*.
+- **Why v3.21.10 works**: Version `3.21.10.317749522` is a monolithic APK that downloads voice packs via Android's built-in `DownloadManager` directly over HTTPS from Google's static CDN servers (`dl.google.com`), with zero dependency on Google Play Store.
+- **No patching needed**: Google TTS v3.21.10 does not restrict client apps or verify caller package signatures. You can install the original, unpatched APK directly.
+
+#### Step-by-Step TTS Setup:
+
+1. **Download the APK**:
+   - On APKMirror, search for **`Speech Recognition & Synthesis 3.21.10.317749522`**.
+   - Download the **arm64-v8a (nodpi)** variant (`APK`, ~23 MB).
+2. **Install on the Head Unit**:
+   ```bash
+   adb install -r <path_to_downloaded_tts_apk>
+   ```
+3. **Configure Default TTS Engine**:
+   - In Android / Car Settings &rarr; **Accessibility** (or **Languages & input**) &rarr; **Text-to-speech output**.
+   - Set **Speech Recognition and Synthesis from Google** as the preferred engine.
+   - Or configure it via ADB:
+     ```bash
+     adb shell settings put secure tts_default_synth com.google.android.tts
+     ```
+4. **Download Your Language Voice Pack**:
+   - Tap the **gear icon** next to *Speech Recognition and Synthesis from Google* &rarr; **Install voice data**.
+   - Ensure the car is connected to Wi-Fi, tap your desired language (e.g. *English (United States)* or *English (United Kingdom)*), and download the high-quality voice pack.
+5. **Verify Voice Output**:
+   - In Google Maps, go to **Settings &rarr; Navigation settings &rarr; Play test sound**.
+   - You should hear *"Your destination is on the right"*.
+   - During active navigation, street names and alerts will be announced over the vehicle speakers.
+
+### Alternative Third-Party Engines
+
+The patch also supports open-source AOSP TTS engines such as **RHVoice** or **Sherpa-ONNX**:
+1. Install your preferred TTS engine APK.
+2. Download your desired voice data inside the engine app.
+3. Select it as the default synthesis engine in Android settings.
+4. Patched Google Maps will automatically detect and bind to it on startup.
+
 ## Troubleshooting
 
 ### `VerifyException` at Rebuilding APK (Windows)
