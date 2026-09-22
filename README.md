@@ -109,7 +109,7 @@ For BYD DiLink and other de-Googled environments, **Google Text-to-Speech v3.21.
 
 1. **Download the APK**:
    - On APKMirror, search for **`Speech Recognition & Synthesis 3.21.10.317749522`**.
-   - Download the **arm64-v8a (nodpi)** variant (`APK`, ~23 MB).
+   - Download the **arm64-v8a (nodpi)** variant (`APK`, ~21 MB).
 2. **Install on the Head Unit**:
    ```bash
    adb install -r <path_to_downloaded_tts_apk>
@@ -122,16 +122,22 @@ For BYD DiLink and other de-Googled environments, **Google Text-to-Speech v3.21.
    - (Or in Android / Car Settings &rarr; **Accessibility** / **Languages & input** &rarr; **Text-to-speech output** if accessible on your firmware).
 
 4. **Launch Voice Data Download UI**:
+   - Ensure the Android Download Manager provider is enabled (some BYD firmwares disable it by default, which blocks voice pack downloads):
+     ```bash
+     adb shell pm enable com.android.providers.downloads
+     ```
    - Because BYD DiLink firmware hides the standard Android TTS settings gear icon, launch the voice installer activity directly via ADB while connected to Wi-Fi:
      ```bash
      adb shell am start -a android.speech.tts.engine.INSTALL_TTS_DATA -p com.google.android.tts
      ```
    - On the head unit screen, select your preferred language (e.g. *English (United States)* or *English (United Kingdom)*) and tap the download icon next to the voice pack.
 
-5. **BYD Background Keep-Alive & Whitelist (Crucial)**:
-   - Prevent BYD's aggressive background task killer from terminating the TTS service while driving:
+5. **BYD Background Keep-Alive & Permissions (Crucial)**:
+   - Grant background execution and alert window permissions, and whitelist the engine from battery idle / Doze to prevent BYD's background task killer from terminating the TTS service while driving:
      ```bash
      adb shell dumpsys deviceidle whitelist +com.google.android.tts
+     adb shell appops set com.google.android.tts RUN_IN_BACKGROUND allow
+     adb shell appops set com.google.android.tts SYSTEM_ALERT_WINDOW allow
      ```
    - On the BYD rotating screen / Pad: Go to **Vehicle Settings &rarr; App Management** (or **Battery / Auto-start management**) &rarr; look for **Disable auto-start app** and ensure **`Google Speech Services / com.google.android.tts` is unchecked (allowed to auto-start / run in background)**.
 
