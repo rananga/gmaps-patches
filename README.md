@@ -115,19 +115,30 @@ For BYD DiLink and other de-Googled environments, **Google Text-to-Speech v3.21.
    adb install -r <path_to_downloaded_tts_apk>
    ```
 3. **Configure Default TTS Engine**:
-   - In Android / Car Settings &rarr; **Accessibility** (or **Languages & input**) &rarr; **Text-to-speech output**.
-   - Set **Speech Recognition and Synthesis from Google** as the preferred engine.
-   - Or configure it via ADB:
+   - Set Google TTS as the preferred system engine via ADB:
      ```bash
      adb shell settings put secure tts_default_synth com.google.android.tts
      ```
-4. **Download Your Language Voice Pack**:
-   - Tap the **gear icon** next to *Speech Recognition and Synthesis from Google* &rarr; **Install voice data**.
-   - Ensure the car is connected to Wi-Fi, tap your desired language (e.g. *English (United States)* or *English (United Kingdom)*), and download the high-quality voice pack.
-5. **Verify Voice Output**:
+   - (Or in Android / Car Settings &rarr; **Accessibility** / **Languages & input** &rarr; **Text-to-speech output** if accessible on your firmware).
+
+4. **Launch Voice Data Download UI**:
+   - Because BYD DiLink firmware hides the standard Android TTS settings gear icon, launch the voice installer activity directly via ADB while connected to Wi-Fi:
+     ```bash
+     adb shell am start -a android.speech.tts.engine.INSTALL_TTS_DATA -p com.google.android.tts
+     ```
+   - On the head unit screen, select your preferred language (e.g. *English (United States)* or *English (United Kingdom)*) and tap the download icon next to the voice pack.
+
+5. **BYD Background Keep-Alive & Whitelist (Crucial)**:
+   - Prevent BYD's aggressive background task killer from terminating the TTS service while driving:
+     ```bash
+     adb shell dumpsys deviceidle whitelist +com.google.android.tts
+     ```
+   - On the BYD rotating screen / Pad: Go to **Vehicle Settings &rarr; App Management** (or **Battery / Auto-start management**) &rarr; look for **Disable auto-start app** and ensure **`Google Speech Services / com.google.android.tts` is unchecked (allowed to auto-start / run in background)**.
+
+6. **Verify Voice Output**:
    - In Google Maps, go to **Settings &rarr; Navigation settings &rarr; Play test sound**.
    - You should hear *"Your destination is on the right"*.
-   - During active navigation, street names and alerts will be announced over the vehicle speakers.
+   - During active navigation, street names and alerts will be announced over the vehicle speakers with automatic media ducking.
 
 ### Alternative Third-Party Engines
 
