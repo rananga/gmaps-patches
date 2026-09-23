@@ -70,7 +70,22 @@ private val compatibility = Compatibility(
     signatures = setOf(ORIGINAL_CERT_SHA256, ORIGINAL_CERT_SHA256_ANDROID_13_PLUS),
     targets = listOf(
         AppTarget(
-            version = null,
+            version = "26.35.04.969485213",
+            isExperimental = false,
+            minSdk = 28,
+        ),
+        AppTarget(
+            version = "26.36.05.973607363",
+            isExperimental = false,
+            minSdk = 28,
+        ),
+        AppTarget(
+            version = "26.37.05.977222275",
+            isExperimental = false,
+            minSdk = 28,
+        ),
+        AppTarget(
+            version = "26.38.01.980791571",
             isExperimental = false,
             minSdk = 28,
         ),
@@ -546,6 +561,12 @@ private val mediaAlertAudioAttributesFingerprint = Fingerprint(
     },
 )
 
+private val ttsProviderFactoryFingerprint = Fingerprint(
+    returnType = "V",
+    parameters = listOf(),
+    strings = listOf("tts-temp"),
+)
+
 private fun Any.methodReferenceOrNull() =
     (this as? ReferenceInstruction)?.reference as? MethodReference
 
@@ -768,11 +789,169 @@ private fun app.morphe.patcher.patch.BytecodePatchContext.patchTtsEngine() {
     var initHooked = 0
     var attributesHooked = 0
     var setEngineHooked = 0
-    var flagsHooked = 0
     var wifiBypassed = 0
     var factoryHooked = 0
     var audioResolverHooked = 0
 
+    // Guarded Hook 1: Resolve Maneuver Audio Manager via stable "tts-temp" fingerprint
+    val factoryMethod = uniqueMapsHook(ttsProviderFactoryFingerprint, "TTS provider factory", required = false)
+    if (factoryMethod != null) {
+        val audioManagerClass = mutableClassDefBy(factoryMethod.definingClass)
+
+        // 1a. Guarded Hook: TTS Provider Factory (dynamic provider initialization)
+        // Find Executor.execute and the subsequent dynamic provider factory call factory.a(...)
+        val factoryInstructions = factoryMethod.implementation?.instructions?.toList()
+            ?: throw PatchException("Missing implementation for TTS provider factory: $factoryMethod")
+
+        val execIdx = factoryInstructions.indexOfFirst { ins ->
+            ins.methodReferenceOrNull()?.let { ref ->
+                ref.definingClass == "Ljava/util/concurrent/Executor;" && ref.name == "execute"
+            } == true
+        }
+        if (execIdx == -1) throw PatchException("Executor.execute not found in TTS provider factory: $factoryMethod")
+
+        val dynamicFactoryIdx = factoryInstructions.subList(execIdx + 1, factoryInstructions.size).indexOfFirst { ins ->
+            ins.methodReferenceOrNull()?.let { ref ->
+                ref.name == "a" && ref.parameterTypes.size == 2 && ref.returnType != "V"
+            } == true
+        }.let { if (it == -1) -1 else it + execIdx + 1 }
+        if (dynamicFactoryIdx == -1) throw PatchException("Dynamic TTS factory call not found in provider factory: $factoryMethod")
+
+        // Remove the gating instructions between Executor.execute and factory.a(...)
+        val removeCount = dynamicFactoryIdx - (execIdx + 1)
+        factoryMethod.removeInstructions(execIdx + 1, removeCount)
+        factoryHooked++
+
+        // 1b. Guarded Hook: Maneuver Audio Resolver (prioritize dynamic street names with canned fallback)
+        // Locate resolver method (takes 1 parameter, returns AudioResult, and contains File.exists())
+        val resolverMethod = audioManagerClass.methods.firstOrNull { m ->
+            m.parameterTypes.size == 1 &&
+                m.returnType != "V" &&
+                m.returnType != "Z" &&
+                m.implementation?.instructions?.any { ins ->
+                    ins.methodReferenceOrNull()?.let { ref ->
+                        ref.definingClass == "Ljava/io/File;" && ref.name == "exists"
+                    } == true
+                } == true
+        } ?: throw PatchException("Maneuver audio resolver method not found in ${audioManagerClass.type}")
+
+        val resIns = resolverMethod.implementation?.instructions?.toList()
+            ?: throw PatchException("Missing implementation for maneuver audio resolver: $resolverMethod")
+
+        if (resIns.size < 43) {
+            throw PatchException("Unexpected instruction count (${resIns.size}) in maneuver audio resolver: $resolverMethod")
+        }
+
+        // Dynamically extract all method, field, and class references from existing resolver instructions
+        val cannedProviderMethod = (resIns[5] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedProviderMethod from $resolverMethod")
+        val cannedCast = (resIns[10] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedCast from $resolverMethod")
+        val cannedFieldG = (resIns[11] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedFieldG from $resolverMethod")
+        val cannedFieldE = (resIns[12] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedFieldE from $resolverMethod")
+        val cannedFieldB = (resIns[13] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedFieldB from $resolverMethod")
+        val cannedMethodB = (resIns[14] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedMethodB from $resolverMethod")
+        val cannedFieldF = (resIns[16] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedFieldF from $resolverMethod")
+        val cannedMethodL = (resIns[17] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve cannedMethodL from $resolverMethod")
+
+        val dynamicProviderMethod = (resIns[24] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve dynamicProviderMethod from $resolverMethod")
+        val dynamicResolveMethod = (resIns[29] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve dynamicResolveMethod from $resolverMethod")
+
+        val fieldD = (resIns[39] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve fieldD from $resolverMethod")
+        val fieldE = (resIns[40] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve fieldE from $resolverMethod")
+        val audioClass = (resIns[41] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve audioClass from $resolverMethod")
+        val audioInit = (resIns[42] as? ReferenceInstruction)?.reference
+            ?: throw PatchException("Failed to resolve audioInit from $resolverMethod")
+
+        val regCount = resolverMethod.implementation!!.registerCount
+        val p0 = regCount - 2
+        val p1 = regCount - 1
+
+        resolverMethod.removeInstructions(0, resIns.size)
+        resolverMethod.addInstructions(
+            0,
+            """
+                invoke-virtual {v$p0}, $dynamicProviderMethod
+                move-result-object v0
+                if-eqz v0, :check_canned
+                invoke-interface {v0, v$p1}, $dynamicResolveMethod
+                move-result-object v0
+                if-eqz v0, :check_canned
+                invoke-virtual {v0}, Ljava/io/File;->exists()Z
+                move-result v2
+                if-eqz v2, :check_canned
+                invoke-virtual {v0}, Ljava/io/File;->canRead()Z
+                move-result v2
+                if-eqz v2, :check_canned
+                iget-object v2, v$p0, $fieldD
+                iget-object v3, v$p0, $fieldE
+                const/4 v4, 0x1
+                new-instance v1, $audioClass
+                invoke-direct {v1, v0, v2, v3, v4}, $audioInit
+                return-object v1
+
+                :check_canned
+                invoke-virtual {v$p0}, $cannedProviderMethod
+                move-result-object v0
+                if-eqz v0, :return_null
+                check-cast v0, $cannedCast
+                iget-object v2, v0, $cannedFieldG
+                iget-object v3, v0, $cannedFieldE
+                iget-object v4, v0, $cannedFieldB
+                invoke-static {v4, v$p1, v3, v2}, $cannedMethodB
+                move-result-object v2
+                iget-object v0, v0, $cannedFieldF
+                invoke-virtual {v0, v2}, $cannedMethodL
+                move-result-object v0
+                if-eqz v0, :return_null
+                invoke-virtual {v0}, Ljava/io/File;->exists()Z
+                move-result v2
+                if-eqz v2, :return_null
+                invoke-virtual {v0}, Ljava/io/File;->canRead()Z
+                move-result v2
+                if-eqz v2, :return_null
+                iget-object v2, v$p0, $fieldD
+                iget-object v3, v$p0, $fieldE
+                const/4 v4, 0x0
+                new-instance v1, $audioClass
+                invoke-direct {v1, v0, v2, v3, v4}, $audioInit
+                return-object v1
+
+                :return_null
+                const/4 v1, 0x0
+                return-object v1
+            """.trimIndent(),
+        )
+        audioResolverHooked++
+
+        // 1c. Guarded Hook: Voice Guidance Enabled
+        val voiceEnabledMethod = audioManagerClass.methods.firstOrNull { m ->
+            m.parameterTypes.isEmpty() && m.returnType == "Z"
+        }
+        if (voiceEnabledMethod != null) {
+            voiceEnabledMethod.addInstructions(
+                0,
+                """
+                    const/4 v0, 0x1
+                    return v0
+                """.trimIndent(),
+            )
+            wifiBypassed++
+        }
+    }
+
+    // 2. Hook TextToSpeech constructor and audio attributes across all classes
     classDefForEach { classDef ->
         if (!classDef.type.startsWith("Lapp/morphe/extension/")) {
             val mutableClass = mutableClassDefBy(classDef)
@@ -781,136 +960,7 @@ private fun app.morphe.patcher.patch.BytecodePatchContext.patchTtsEngine() {
                 val instructions = implementation.instructions.toList()
                 var offset = 0
 
-                // 1. Bypass Wi-Fi check on speech dispatch if this method checks Layob.b
-                if (method.returnType == "Z" && method.parameterTypes.isEmpty()) {
-                    val accessesLayob = instructions.any { ins ->
-                        (ins as? ReferenceInstruction)?.reference?.let { ref ->
-                            (ref is FieldReference && ref.definingClass.contains("Layob")) ||
-                                (ref is TypeReference && ref.type.contains("Layob"))
-                        } == true
-                    }
-                    if (accessesLayob && instructions.any { it.opcode == Opcode.IGET_BOOLEAN }) {
-                        method.addInstructions(
-                            0,
-                            """
-                                const/4 v0, 0x1
-                                return v0
-                            """.trimIndent(),
-                        )
-                        wifiBypassed++
-                        return@forEach
-                    }
-                }
-
-
-                // 2. Patch TTS Provider Factory (Lbmmt;->h()) to unconditionally create dynamic provider
-                if (classDef.type == "Lbmmt;" && method.name == "h" &&
-                    method.returnType == "V" && method.parameterTypes.isEmpty()) {
-                    // Remove the 22 instructions (25 to 46) that gate dynamic TTS creation behind cqgy.d and cggd flags.
-                    // Instruction 47 (invoking blvr.a to create dynamic Lblvb) will now execute unconditionally right after instruction 24.
-                    method.removeInstructions(25, 22)
-                    factoryHooked++
-                    return@forEach
-                }
-
-                // 3. Patch Maneuver Audio Resolver (Lbmmt;->g(Lblvm;)Lbmmr;) to prioritize dynamic street names with canned fallback
-                if (classDef.type == "Lbmmt;" && method.name == "g" &&
-                    method.parameterTypes.map { it.toString() } == listOf("Lblvm;") && method.returnType == "Lbmmr;") {
-                    val count = implementation.instructions.count()
-                    method.removeInstructions(0, count)
-                    method.addInstructions(
-                        0,
-                        """
-                            invoke-virtual {v6}, Lbmmt;->b()Lblvu;
-                            move-result-object v0
-                            if-eqz v0, :check_canned
-                            invoke-interface {v0, v7}, Lblvu;->a(Lblvm;)Ljava/io/File;
-                            move-result-object v0
-                            if-eqz v0, :check_canned
-                            invoke-virtual {v0}, Ljava/io/File;->exists()Z
-                            move-result v2
-                            if-eqz v2, :check_canned
-                            invoke-virtual {v0}, Ljava/io/File;->canRead()Z
-                            move-result v2
-                            if-eqz v2, :check_canned
-                            iget-object v2, v6, Lbmmt;->d:Lbmlh;
-                            iget-object v3, v6, Lbmmt;->e:Layxm;
-                            const/4 v4, 0x1
-                            new-instance v1, Lbmmr;
-                            invoke-direct {v1, v0, v2, v3, v4}, Lbmmr;-><init>(Ljava/io/File;Lbmlh;Layxm;Z)V
-                            return-object v1
-
-                            :check_canned
-                            invoke-virtual {v6}, Lbmmt;->c()Lblvu;
-                            move-result-object v0
-                            if-eqz v0, :return_null
-                            check-cast v0, Lblvh;
-                            iget-object v2, v0, Lblvh;->g:Lcamt;
-                            iget-object v3, v0, Lblvh;->e:Lcaxx;
-                            iget-object v4, v0, Lblvh;->b:Lawcl;
-                            invoke-static {v4, v7, v3, v2}, Lblvh;->b(Lawcl;Lblvm;Lcaxx;Lcamt;)Lblvp;
-                            move-result-object v2
-                            iget-object v0, v0, Lblvh;->f:Lbeey;
-                            invoke-virtual {v0, v2}, Lbeey;->l(Lblvp;)Ljava/io/File;
-                            move-result-object v0
-                            if-eqz v0, :return_null
-                            invoke-virtual {v0}, Ljava/io/File;->exists()Z
-                            move-result v2
-                            if-eqz v2, :return_null
-                            invoke-virtual {v0}, Ljava/io/File;->canRead()Z
-                            move-result v2
-                            if-eqz v2, :return_null
-                            iget-object v2, v6, Lbmmt;->d:Lbmlh;
-                            iget-object v3, v6, Lbmmt;->e:Layxm;
-                            const/4 v4, 0x0
-                            new-instance v1, Lbmmr;
-                            invoke-direct {v1, v0, v2, v3, v4}, Lbmmr;-><init>(Ljava/io/File;Lbmlh;Layxm;Z)V
-                            return-object v1
-
-                            :return_null
-                            const/4 v1, 0x0
-                            return-object v1
-                        """.trimIndent(),
-                    )
-                    audioResolverHooked++
-                    return@forEach
-                }
-
                 instructions.forEachIndexed { index, instruction ->
-                    // 4. Force enable dynamic speech flags (cqgy.c:Z, o:Z, m:Z, p:Z, cggd.c:Z, e:Z, i:Z)
-                    if (instruction.opcode == Opcode.IGET_BOOLEAN) {
-                        val fieldRef = (instruction as? ReferenceInstruction)?.reference as? FieldReference
-                        if (fieldRef?.type == "Z") {
-                            val reg = (instruction as? TwoRegisterInstruction)?.registerA
-                            if (reg != null) {
-                                if (fieldRef.definingClass.contains("cqgy")) {
-                                    when (fieldRef.name) {
-                                        "c", "o", "m" -> {
-                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x1")
-                                            flagsHooked++
-                                        }
-                                        "p" -> {
-                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x0")
-                                            flagsHooked++
-                                        }
-                                    }
-                                } else if (fieldRef.definingClass.contains("cggd")) {
-                                    when (fieldRef.name) {
-                                        "c" -> {
-                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x1")
-                                            flagsHooked++
-                                        }
-                                        "e", "i" -> {
-                                            method.replaceInstruction(index + offset, "const/4 v$reg, 0x0")
-                                            flagsHooked++
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. Hook TextToSpeech constructor and audio attributes
                     val ref = instruction.methodReferenceOrNull() ?: return@forEachIndexed
                     if (ref.definingClass == "Landroid/speech/tts/TextToSpeech;") {
                         when {
@@ -943,7 +993,7 @@ private fun app.morphe.patcher.patch.BytecodePatchContext.patchTtsEngine() {
         }
     }
 
-    logger.info("Patched TextToSpeech: factory=$factoryHooked, resolver=$audioResolverHooked, inits=$initHooked, audioAttributes=$attributesHooked, setEngine=$setEngineHooked, dynamicFlags=$flagsHooked, wifiBypassed=$wifiBypassed")
+    logger.info("Patched TextToSpeech: factory=$factoryHooked, resolver=$audioResolverHooked, inits=$initHooked, audioAttributes=$attributesHooked, setEngine=$setEngineHooked, wifiBypassed=$wifiBypassed")
 }
 
 private fun app.morphe.patcher.patch.BytecodePatchContext.patchExtensionRuntime() {
